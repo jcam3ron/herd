@@ -3,12 +3,14 @@ package herd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"testing"
 
 	"github.com/jcam3ron/herd/internal/backend"
 	"github.com/jcam3ron/herd/internal/snapshot"
+	"github.com/jcam3ron/herd/internal/zmxclient"
 )
 
 // fakeBackend is a minimal backend.Backend for exercising RestoreInPlace
@@ -34,10 +36,28 @@ func (b *fakeBackend) Close(_ context.Context, id string) error {
 
 func (b *fakeBackend) Wait(context.Context, string) error { return nil }
 
-func (b *fakeBackend) Apply(_ context.Context, spawn []backend.PlannedWindow, reuse *backend.Reuse) error {
+func (b *fakeBackend) Apply(_ context.Context, spawn []backend.PlannedWindow, reuse *backend.Reuse) ([]string, error) {
 	b.spawn = spawn
 	b.reuse = reuse
-	return nil
+	ids := make([]string, len(spawn))
+	for i := range spawn {
+		ids[i] = fmt.Sprintf("spawned-%d", i)
+	}
+	return ids, nil
+}
+
+// zmxSetCalls wraps zmx's Run to additionally record "zmx set ..." calls
+// (SetLastWindow), which fakeZmx's own Run otherwise ignores.
+func zmxSetCalls(zmx *zmxclient.Client) *[][]string {
+	var calls [][]string
+	inner := zmx.Run
+	zmx.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "zmx" && len(args) > 0 && args[0] == "set" {
+			calls = append(calls, args)
+		}
+		return inner(ctx, name, args...)
+	}
+	return &calls
 }
 
 func TestRestoreInPlaceExcludesOwnWindow(t *testing.T) {
@@ -70,6 +90,7 @@ func TestRestoreInPlaceExcludesOwnWindow(t *testing.T) {
 		attached = session
 		return nil
 	}
+	setCalls := zmxSetCalls(zmx)
 
 	app := &App{
 		Backend: fb,
@@ -81,6 +102,22 @@ func TestRestoreInPlaceExcludesOwnWindow(t *testing.T) {
 
 	if err := app.RestoreInPlace(context.Background(), "proj", false); err != nil {
 		t.Fatalf("RestoreInPlace: %v", err)
+	}
+
+	// Both the reused window (id "1") and the newly spawned one must be
+	// labeled by herd itself -- neither goes through an interactive
+	// shell, so the shell `zmx` wrapper never runs for either.
+	wantSetCalls := [][]string{
+		{"set", "other", "last_window=spawned-0"},
+		{"set", "reattach-here", "last_window=1"},
+	}
+	if len(*setCalls) != len(wantSetCalls) {
+		t.Fatalf("zmx set calls = %v, want %v", *setCalls, wantSetCalls)
+	}
+	for i, want := range wantSetCalls {
+		if !slices.Equal((*setCalls)[i], want) {
+			t.Errorf("zmx set call %d = %v, want %v", i, (*setCalls)[i], want)
+		}
 	}
 
 	for _, id := range fb.closed {
@@ -131,6 +168,7 @@ func TestRestoreInPlaceReusedSlotPlain(t *testing.T) {
 		attachCalled = true
 		return nil
 	}
+	setCalls := zmxSetCalls(zmx)
 
 	app := &App{
 		Backend: fb,
@@ -149,6 +187,9 @@ func TestRestoreInPlaceReusedSlotPlain(t *testing.T) {
 
 	if attachCalled {
 		t.Error("Zmx.Attach was called for a plain reused slot")
+	}
+	if len(*setCalls) != 0 {
+		t.Errorf("zmx set calls = %v, want none for a plain reused slot", *setCalls)
 	}
 	if fb.reuse == nil || fb.reuse.ID != ownWindowID {
 		t.Fatalf("Apply reuse = %+v, want ID %q", fb.reuse, ownWindowID)

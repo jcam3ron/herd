@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"slices"
 	"time"
 
@@ -16,10 +15,6 @@ import (
 	"github.com/jcam3ron/herd/internal/snapshot"
 	"github.com/jcam3ron/herd/internal/zmxclient"
 )
-
-// zmxTitleRe matches the "zmx:<session>" title fish_title.fish emits
-// while a zmx session is attached.
-var zmxTitleRe = regexp.MustCompile(`^zmx:(?P<session>[^[:space:]]+)$`)
 
 // windowLabel is the human-readable identifier for a planned window: its
 // zmx session if it has one, else its plain title.
@@ -30,14 +25,6 @@ func windowLabel(w backend.PlannedWindow) string {
 	return w.Title
 }
 
-func sessionFromTitle(title string) (string, bool) {
-	m := zmxTitleRe.FindStringSubmatch(title)
-	if m == nil {
-		return "", false
-	}
-	return m[zmxTitleRe.SubexpIndex("session")], true
-}
-
 // classified pairs a backend.PlannedWindow with the raw window id it came
 // from, needed for Close/Wait during restore.
 type classified struct {
@@ -45,9 +32,11 @@ type classified struct {
 	ID string
 }
 
-// classify tags each raw window as zmx-backed (by title, falling back to
-// the last_window label for windows whose title was overwritten by
-// something else -- claude, vim, ssh) or plain.
+// classify tags each raw window as zmx-backed (by its last_window label)
+// or plain. herd never reads or sets the window title: it's the sole
+// source of truth for which window belongs to which zmx session, set by
+// itself for windows it spawns (see RestoreInPlace) and by the shell
+// `zmx` wrapper for windows attached manually (see shell/herd.fish).
 func classify(ctx context.Context, zmx *zmxclient.Client, raws []backend.RawWindow) ([]classified, error) {
 	labels, err := zmx.LastWindowLabels(ctx)
 	if err != nil {
@@ -56,11 +45,7 @@ func classify(ctx context.Context, zmx *zmxclient.Client, raws []backend.RawWind
 
 	out := make([]classified, len(raws))
 	for i, w := range raws {
-		session, ok := sessionFromTitle(w.Title)
-		if !ok {
-			session, ok = labels[w.ID]
-		}
-		if ok {
+		if session, ok := labels[w.ID]; ok {
 			out[i] = classified{backend.PlannedWindow{Kind: "zmx", Session: session, Layout: w.Layout}, w.ID}
 		} else {
 			out[i] = classified{backend.PlannedWindow{Kind: "plain", Title: w.Title, Layout: w.Layout}, w.ID}
@@ -238,12 +223,29 @@ func (a *App) RestoreInPlace(ctx context.Context, name string, force bool) error
 		}
 	}
 
-	if err := a.Backend.Apply(ctx, spawn, reuse); err != nil {
+	newIDs, err := a.Backend.Apply(ctx, spawn, reuse)
+	if err != nil {
 		return err
 	}
+
+	// Label each spawned zmx window ourselves, rather than depending on
+	// the shell `zmx` wrapper: these windows are spawned via `ghostty -e
+	// zmx attach ...` directly, never through an interactive shell, so
+	// the wrapper never runs for them.
+	for i, w := range spawn {
+		if w.Kind == "zmx" {
+			if err := a.Zmx.SetLastWindow(ctx, w.Session, newIDs[i]); err != nil {
+				fmt.Fprintf(a.Stdout, "warning: could not label zmx session %q for future saves: %v\n", w.Session, err)
+			}
+		}
+	}
+
 	fmt.Fprintf(a.Stdout, "restored %q\n", name)
 
 	if reuse != nil && reuse.Window.Kind == "zmx" {
+		if err := a.Zmx.SetLastWindow(ctx, reuse.Window.Session, reuse.ID); err != nil {
+			fmt.Fprintf(a.Stdout, "warning: could not label zmx session %q for future saves: %v\n", reuse.Window.Session, err)
+		}
 		if err := a.Zmx.Attach(reuse.Window.Session); err != nil {
 			return fmt.Errorf("restored, but could not attach this terminal to zmx session %q: %w", reuse.Window.Session, err)
 		}

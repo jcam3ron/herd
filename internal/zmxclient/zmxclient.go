@@ -56,11 +56,18 @@ func (c *Client) Sessions(ctx context.Context) ([]string, error) {
 	return nonEmptyLines(string(out)), nil
 }
 
+// SetLastWindow records windowID as session's last_window label -- the
+// same bookkeeping the shell `zmx` wrapper does for a manual attach (see
+// shell/herd.fish).
+func (c *Client) SetLastWindow(ctx context.Context, session, windowID string) error {
+	_, err := c.Run(ctx, "zmx", "set", session, "last_window="+windowID)
+	return err
+}
+
 // LastWindowLabels returns every session's last_window label as a map
-// from window id to session name. This is the fallback path for windows
-// whose title no longer says "zmx:<name>" because something else
-// (claude, vim, ssh) overwrote it: the fish `zmx` wrapper sets this label
-// at attach time (see fish/zmx-wrapper.fish).
+// from window id to session name. herd is the sole source of truth for
+// which window belongs to which zmx session; it never reads or sets the
+// window title.
 func (c *Client) LastWindowLabels(ctx context.Context) (map[string]string, error) {
 	sessions, err := c.Sessions(ctx)
 	if err != nil {

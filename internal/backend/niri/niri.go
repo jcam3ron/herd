@@ -231,10 +231,10 @@ func columnOf(wins []window, id int) (int, bool) {
 // be sure it's the right window to consume. If reuse is non-nil, its
 // window is already open as reuse.ID and is used only to seed that
 // stacking state, never spawned or repositioned itself.
-func (b *Backend) Apply(ctx context.Context, spawn []backend.PlannedWindow, reuse *backend.Reuse) error {
+func (b *Backend) Apply(ctx context.Context, spawn []backend.PlannedWindow, reuse *backend.Reuse) ([]string, error) {
 	ws, err := b.focusedWorkspaceID(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var prevID, prevCol int
@@ -244,47 +244,49 @@ func (b *Backend) Apply(ctx context.Context, spawn []backend.PlannedWindow, reus
 	if reuse != nil {
 		var l layout
 		if err := json.Unmarshal(reuse.Window.Layout, &l); err != nil {
-			return fmt.Errorf("decoding saved layout: %w", err)
+			return nil, fmt.Errorf("decoding saved layout: %w", err)
 		}
 		id, err := strconv.Atoi(reuse.ID)
 		if err != nil {
-			return fmt.Errorf("invalid reuse window id %q: %w", reuse.ID, err)
+			return nil, fmt.Errorf("invalid reuse window id %q: %w", reuse.ID, err)
 		}
 		prevID, prevCol, havePrev = id, l.Col, true
 		known[id] = true
 	}
 
+	ids := make([]string, 0, len(spawn))
 	for _, p := range spawn {
 		var l layout
 		if err := json.Unmarshal(p.Layout, &l); err != nil {
-			return fmt.Errorf("decoding saved layout: %w", err)
+			return nil, fmt.Errorf("decoding saved layout: %w", err)
 		}
 
 		switch p.Kind {
 		case "zmx":
 			if err := ghostty.Spawn(b.WorkDir, []string{"zmx", "attach", p.Session}); err != nil {
-				return err
+				return nil, err
 			}
 		default:
 			if err := ghostty.Spawn(b.WorkDir, nil); err != nil {
-				return err
+				return nil, err
 			}
 		}
 
 		newID, wins, err := b.waitForNewWindow(ctx, ws, known)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		ids = append(ids, strconv.Itoa(newID))
 
 		if havePrev && l.Col == prevCol {
 			newCol, newOK := columnOf(wins, newID)
 			prevWinCol, prevOK := columnOf(wins, prevID)
 			if newOK && prevOK && newCol == prevWinCol+1 {
 				if _, err := b.Run(ctx, "niri", "msg", "action", "focus-window", "--id", strconv.Itoa(prevID)); err != nil {
-					return err
+					return nil, err
 				}
 				if _, err := b.Run(ctx, "niri", "msg", "action", "consume-window-into-column"); err != nil {
-					return err
+					return nil, err
 				}
 			} else {
 				fmt.Fprintf(b.out(), "warning: could not stack window under column %d; leaving it as its own column\n", l.Col)
@@ -301,5 +303,5 @@ func (b *Backend) Apply(ctx context.Context, spawn []backend.PlannedWindow, reus
 
 		prevID, prevCol, havePrev = newID, l.Col, true
 	}
-	return nil
+	return ids, nil
 }

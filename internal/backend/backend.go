@@ -62,9 +62,14 @@ type Backend interface {
 	Close(ctx context.Context, id string) error
 	Wait(ctx context.Context, id string) error
 
-	// Apply spawns and arranges spawn's windows in order. If reuse is
-	// non-nil, its window is already open as reuse.ID (the one herd
-	// itself was invoked from) and must not be spawned again -- it's
-	// only used to seed layout reconstruction for spawn's entries.
-	Apply(ctx context.Context, spawn []PlannedWindow, reuse *Reuse) error
+	// Apply spawns and arranges spawn's windows in order, returning each
+	// spawned window's backend-specific id (same order and length as
+	// spawn) so the caller can label zmx-kind ones (see
+	// zmxclient.Client.SetLastWindow) without depending on any shell
+	// integration having done it already. If reuse is non-nil, its
+	// window is already open as reuse.ID (the one herd itself was
+	// invoked from) and must not be spawned again -- it's only used to
+	// seed layout reconstruction for spawn's entries, and is not
+	// included in the returned ids since the caller already has it.
+	Apply(ctx context.Context, spawn []PlannedWindow, reuse *Reuse) ([]string, error)
 }

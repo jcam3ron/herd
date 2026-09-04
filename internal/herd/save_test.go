@@ -12,7 +12,7 @@ import (
 func TestSaveWarnsOnOverwrite(t *testing.T) {
 	fb := &fakeBackend{
 		name:    "niri",
-		windows: []backend.RawWindow{{ID: "1", Title: "zmx:new-content"}},
+		windows: []backend.RawWindow{{ID: "1", Title: "irrelevant"}},
 	}
 	store := &snapshot.Store{Dir: t.TempDir()}
 	original := snapshot.Snapshot{
@@ -48,7 +48,7 @@ func TestSaveWarnsOnOverwrite(t *testing.T) {
 func TestSaveForceSkipsOverwriteConfirm(t *testing.T) {
 	fb := &fakeBackend{
 		name:    "niri",
-		windows: []backend.RawWindow{{ID: "1", Title: "zmx:new-content"}},
+		windows: []backend.RawWindow{{ID: "1", Title: "irrelevant"}},
 	}
 	store := &snapshot.Store{Dir: t.TempDir()}
 	original := snapshot.Snapshot{
@@ -62,7 +62,7 @@ func TestSaveForceSkipsOverwriteConfirm(t *testing.T) {
 
 	app := &App{
 		Backend: fb,
-		Zmx:     fakeZmx(nil),
+		Zmx:     fakeZmx(map[string]string{"new-content": "1"}),
 		Store:   store,
 		Stdout:  io.Discard,
 		// Confirm always declines: force must bypass it entirely.
@@ -85,7 +85,7 @@ func TestSaveForceSkipsOverwriteConfirm(t *testing.T) {
 func TestSaveNewNameSkipsOverwriteConfirm(t *testing.T) {
 	fb := &fakeBackend{
 		name:    "niri",
-		windows: []backend.RawWindow{{ID: "1", Title: "zmx:some-session"}},
+		windows: []backend.RawWindow{{ID: "1", Title: "irrelevant"}},
 	}
 	store := &snapshot.Store{Dir: t.TempDir()}
 

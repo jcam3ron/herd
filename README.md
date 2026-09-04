@@ -14,15 +14,14 @@ This project was built with the assistance of Claude.
 - [niri](https://github.com/YaLTeR/niri), [ghostty](https://ghostty.org),
   [zmx](https://github.com/neurosnap/zmx) on `PATH`
 - fish, bash, or zsh, with `shell/herd.fish`, `shell/herd.bash`, or
-  `shell/herd.zsh` sourced from your config. Each does the same two jobs:
-  tag the ghostty window title with the attached zmx session, and label a
-  session with the window it was attached from, as a fallback for when
-  something else - `claude`, `vim`, `ssh` - has overwritten the title
-  (fish's file is a bit different: it defines `fish_title` and `zmx` as
-  autoloadable functions, so fish users may prefer copying its two
-  functions into `functions/fish_title.fish` and `functions/zmx.fish`
-  instead of sourcing it directly). The Nix package installs these under
-  `$out/share/herd/shell/`.
+  `shell/herd.zsh` sourced from your config. Each defines one `zmx`
+  wrapper function: when you run `zmx attach <session>`, it labels that
+  session with the niri window id it was attached from (right before the
+  blocking attach call, while that window is still focused) so herd can
+  tell a zmx-backed window apart from a plain one later.
+- for windows herd itself spawns during `restore` (not attached manually),
+  it labels them itself, so the shell integration above is only
+  needed for sessions you `zmx attach` by hand.
 - ghostty config: `confirm-close-surface = false` - without it, closing a
   window during restore pops a confirmation dialog `herd` can't click
   through, and restore will hang
@@ -63,13 +62,15 @@ deleting a snapshot. All three accept `-f`/`--force` to skip the prompt:
 
 ## How it works
 
-A zmx-backed window is detected by its ghostty title (`zmx:<session>`, set
-by the shell's title hook), with a fallback to a `last_window=<window-id>`
-label on the zmx session (set by the shell's `zmx` wrapper) for when the
-title has been overwritten by a foreground program. This classification is
-backend-agnostic (`internal/herd`); everything after "here are the windows
-and where they go" - closing, spawning, and reconstructing layout - is
-owned by the active `Backend` (`internal/backend/niri` today).
+A zmx-backed window is detected by a `last_window=<window-id>` label on
+the zmx session - set by herd itself right after spawning or reattaching a
+window during `restore` (see `zmxclient.Client.SetLastWindow`), or by the
+shell's `zmx` wrapper for a session you attach to by hand. herd never
+reads or sets the window title, so it works regardless of your prompt or
+title customization. This classification is backend-agnostic
+(`internal/herd`); everything after "here are the windows and where they
+go" - closing, spawning, and reconstructing layout - is owned by the
+active `Backend` (`internal/backend/niri` today).
 
 Restoring closes the current workspace's windows - for zmx-backed ones this
 just detaches the client, since the session persists in the zmx daemon -

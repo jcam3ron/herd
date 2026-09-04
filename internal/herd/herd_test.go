@@ -40,7 +40,8 @@ func fakeZmx(lastWindow map[string]string) *zmxclient.Client {
 
 func TestClassify(t *testing.T) {
 	zmx := fakeZmx(map[string]string{
-		"claude-session": "42", // title overwritten by claude, no "zmx:" prefix
+		"nixos-config":   "1",
+		"claude-session": "42",
 	})
 
 	raws := []backend.RawWindow{
@@ -64,25 +65,24 @@ func TestClassify(t *testing.T) {
 		t.Errorf("window 1: got kind=%q title=%q, want plain/%q", got[1].Kind, got[1].Title, "no session here")
 	}
 	if got[2].Kind != "zmx" || got[2].Session != "claude-session" {
-		t.Errorf("window 2 (label fallback): got kind=%q session=%q, want zmx/claude-session", got[2].Kind, got[2].Session)
+		t.Errorf("window 2 (label, title overwritten by claude): got kind=%q session=%q, want zmx/claude-session", got[2].Kind, got[2].Session)
 	}
 }
 
-func TestSessionFromTitle(t *testing.T) {
-	cases := []struct {
-		title   string
-		session string
-		ok      bool
-	}{
-		{"zmx:nixos-config", "nixos-config", true},
-		{"zmx:homelab-docs", "homelab-docs", true},
-		{"◑ Project environment switcher for niri and zmx", "", false},
-		{"zmx: has a space", "", false},
+func TestClassifyIgnoresTitle(t *testing.T) {
+	// herd never reads the window title for classification: a
+	// "zmx:<session>"-shaped title with no matching label must still
+	// come back plain.
+	zmx := fakeZmx(nil)
+	raws := []backend.RawWindow{
+		{ID: "1", Title: "zmx:nixos-config", Layout: []byte(`{"col":1,"row":1}`)},
 	}
-	for _, c := range cases {
-		session, ok := sessionFromTitle(c.title)
-		if session != c.session || ok != c.ok {
-			t.Errorf("sessionFromTitle(%q) = (%q, %v), want (%q, %v)", c.title, session, ok, c.session, c.ok)
-		}
+
+	got, err := classify(context.Background(), zmx, raws)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if got[0].Kind != "plain" || got[0].Title != "zmx:nixos-config" {
+		t.Errorf("got kind=%q title=%q, want plain/%q (title-only match must not count)", got[0].Kind, got[0].Title, "zmx:nixos-config")
 	}
 }
