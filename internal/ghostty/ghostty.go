@@ -3,7 +3,12 @@
 // backend-specific.
 package ghostty
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+	"slices"
+	"strings"
+)
 
 // AppID is ghostty's app_id/bundle id, used by backends to filter windows
 // belonging to it.
@@ -28,9 +33,20 @@ func Spawn(workDir string, cmd []string) error {
 		args = append(args, cmd...)
 	}
 	c := exec.Command("ghostty", args...)
+	c.Env = cleanEnv(os.Environ())
 	if err := c.Start(); err != nil {
 		return err
 	}
 	go c.Wait()
 	return nil
+}
+
+// cleanEnv is env with ZMX_SESSION stripped. A spawned window is a
+// genuinely new terminal, not a continuation of whatever spawned it, so
+// it should never inherit which zmx session (if any) its spawner
+// happened to be attached to.
+func cleanEnv(env []string) []string {
+	return slices.DeleteFunc(env, func(kv string) bool {
+		return strings.HasPrefix(kv, "ZMX_SESSION=")
+	})
 }

@@ -2,15 +2,17 @@ package herd
 
 import (
 	"context"
+	"errors"
 	"io"
+	"slices"
 	"testing"
 
 	"github.com/jcam3ron/herd/internal/backend"
 	"github.com/jcam3ron/herd/internal/snapshot"
 )
 
-// fakeBackend is a minimal backend.Backend for exercising Restore without
-// shelling out to niri.
+// fakeBackend is a minimal backend.Backend for exercising RestoreInPlace
+// without shelling out to niri.
 type fakeBackend struct {
 	name    string
 	windows []backend.RawWindow
@@ -38,9 +40,7 @@ func (b *fakeBackend) Apply(_ context.Context, spawn []backend.PlannedWindow, re
 	return nil
 }
 
-func TestRestoreExcludesOwnWindow(t *testing.T) {
-	t.Setenv("ZMX_SESSION", "") // this test isn't exercising the zmx-session guard
-
+func TestRestoreInPlaceExcludesOwnWindow(t *testing.T) {
 	const ownWindowID = "1"
 	fb := &fakeBackend{
 		name: "niri",
@@ -79,13 +79,13 @@ func TestRestoreExcludesOwnWindow(t *testing.T) {
 		Confirm: func(string) bool { return true },
 	}
 
-	if err := app.Restore(context.Background(), "proj", false); err != nil {
-		t.Fatalf("Restore: %v", err)
+	if err := app.RestoreInPlace(context.Background(), "proj", false); err != nil {
+		t.Fatalf("RestoreInPlace: %v", err)
 	}
 
 	for _, id := range fb.closed {
 		if id == ownWindowID {
-			t.Fatalf("Restore closed its own window (id %q): closed = %v", ownWindowID, fb.closed)
+			t.Fatalf("RestoreInPlace closed its own window (id %q): closed = %v", ownWindowID, fb.closed)
 		}
 	}
 	if len(fb.closed) != 1 || fb.closed[0] != "2" {
@@ -105,9 +105,7 @@ func TestRestoreExcludesOwnWindow(t *testing.T) {
 	}
 }
 
-func TestRestoreReusedSlotPlain(t *testing.T) {
-	t.Setenv("ZMX_SESSION", "")
-
+func TestRestoreInPlaceReusedSlotPlain(t *testing.T) {
 	const ownWindowID = "1"
 	fb := &fakeBackend{
 		name: "niri",
@@ -145,8 +143,8 @@ func TestRestoreReusedSlotPlain(t *testing.T) {
 	// The reused slot is plain (id "1"), so it's excluded from raws
 	// before classification -- there's nothing left to warn about or
 	// confirm, and Confirm should never be consulted.
-	if err := app.Restore(context.Background(), "proj", false); err != nil {
-		t.Fatalf("Restore: %v", err)
+	if err := app.RestoreInPlace(context.Background(), "proj", false); err != nil {
+		t.Fatalf("RestoreInPlace: %v", err)
 	}
 
 	if attachCalled {
@@ -163,25 +161,7 @@ func TestRestoreReusedSlotPlain(t *testing.T) {
 	}
 }
 
-func TestRestoreRefusesInsideZmxSession(t *testing.T) {
-	t.Setenv("ZMX_SESSION", "some-session")
-
-	app := &App{
-		Backend: &fakeBackend{name: "niri"},
-		Zmx:     fakeZmx(nil),
-		Store:   &snapshot.Store{Dir: t.TempDir()},
-		Stdout:  io.Discard,
-		Confirm: func(string) bool { return true },
-	}
-
-	if err := app.Restore(context.Background(), "anything", false); err == nil {
-		t.Fatal("Restore from inside a zmx session: expected an error, got nil")
-	}
-}
-
-func TestRestoreForceSkipsConfirm(t *testing.T) {
-	t.Setenv("ZMX_SESSION", "")
-
+func TestRestoreInPlaceForceSkipsConfirm(t *testing.T) {
 	fb := &fakeBackend{
 		name: "niri",
 		windows: []backend.RawWindow{
@@ -210,7 +190,74 @@ func TestRestoreForceSkipsConfirm(t *testing.T) {
 		Confirm: func(string) bool { return false },
 	}
 
-	if err := app.Restore(context.Background(), "proj", true); err != nil {
-		t.Fatalf("Restore with force=true: %v", err)
+	if err := app.RestoreInPlace(context.Background(), "proj", true); err != nil {
+		t.Fatalf("RestoreInPlace with force=true: %v", err)
+	}
+}
+
+// Restore always relaunches into a new window running "restore-in-place"
+// -- there's no special-casing based on how or where it was invoked from
+// (in particular, no $ZMX_SESSION check), so these tests don't set it.
+
+func TestRestoreRelaunches(t *testing.T) {
+	var spawned []string
+	app := &App{
+		Store:       &snapshot.Store{Dir: t.TempDir()},
+		Stdout:      io.Discard,
+		SpawnWindow: func(cmd []string) error { spawned = cmd; return nil },
+	}
+
+	// Never gets far enough to load "anything" as a snapshot -- Restore
+	// relaunches unconditionally, before ever touching the store.
+	if err := app.Restore(context.Background(), "anything", true); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	// The restore-in-place invocation runs inside a shell wrapper (so
+	// the window falls back to an interactive shell instead of closing
+	// once it exits) -- confirm the wrapped command itself, not the
+	// wrapper.
+	if len(spawned) < 7 || spawned[0] != "sh" || spawned[1] != "-c" {
+		t.Fatalf("spawned command = %v, want a sh -c wrapper", spawned)
+	}
+	inner := spawned[4:]
+	if len(inner) < 2 || inner[1] != "restore-in-place" {
+		t.Fatalf("wrapped command = %v, want [<exe> restore-in-place ...]", inner)
+	}
+	// --force must come before the name: herd's flag parsing stops at
+	// the first non-flag argument.
+	if inner[len(inner)-1] != "anything" {
+		t.Errorf("wrapped command = %v, want name last", inner)
+	}
+	if !slices.Contains(inner, "--force") {
+		t.Errorf("wrapped command = %v, want --force propagated", inner)
+	}
+}
+
+func TestRestoreOmitsForceWhenUnset(t *testing.T) {
+	var spawned []string
+	app := &App{
+		Store:       &snapshot.Store{Dir: t.TempDir()},
+		Stdout:      io.Discard,
+		SpawnWindow: func(cmd []string) error { spawned = cmd; return nil },
+	}
+
+	if err := app.Restore(context.Background(), "anything", false); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if slices.Contains(spawned, "--force") {
+		t.Errorf("spawned command = %v, want no --force", spawned)
+	}
+}
+
+func TestRestoreSurfacesSpawnFailure(t *testing.T) {
+	app := &App{
+		Store:       &snapshot.Store{Dir: t.TempDir()},
+		Stdout:      io.Discard,
+		SpawnWindow: func([]string) error { return errors.New("no ghostty on PATH") },
+	}
+
+	if err := app.Restore(context.Background(), "anything", false); err == nil {
+		t.Fatal("Restore when SpawnWindow fails: expected an error, got nil")
 	}
 }

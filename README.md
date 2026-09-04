@@ -48,14 +48,12 @@ Snapshots are stored as JSON under `$XDG_STATE_HOME/herd` (default
 `~/.local/state/herd`) and record which backend they were captured with;
 `restore` refuses to replay a snapshot on a different backend.
 
-`restore` never closes the window it was invoked from (it looks up the
-currently focused window and excludes it) - instead that window becomes
-the saved layout's first window: if that slot was zmx-backed, `herd` execs
+`restore` never does its work in the window it was invoked from - it
+always opens a new window and relaunches itself there, which becomes the
+saved layout's first window: if that slot was zmx-backed, `herd` execs
 itself into `zmx attach` for it (replacing the herd process in place, no
-extra terminal left behind); if it was plain, the terminal is already
+extra wrapper left running); if it was plain, the window is already
 sitting at a blank shell prompt, which is exactly what a plain slot means.
-`restore` also refuses to run at all from inside a zmx session
-(`$ZMX_SESSION` set) - run it from a plain terminal.
 
 `save` warns and asks for confirmation before overwriting an existing
 snapshot; `restore` warns and asks before closing a plain (non-zmx) window

@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/jcam3ron/herd/internal/backend/niri"
+	"github.com/jcam3ron/herd/internal/ghostty"
 	"github.com/jcam3ron/herd/internal/herd"
 	"github.com/jcam3ron/herd/internal/snapshot"
 	"github.com/jcam3ron/herd/internal/zmxclient"
@@ -44,11 +45,12 @@ func main() {
 		fatal(err)
 	}
 	app := &herd.App{
-		Backend: niri.New(),
-		Zmx:     zmxclient.New(),
-		Store:   store,
-		Stdout:  os.Stdout,
-		Confirm: herd.ConfirmPrompt(os.Stdin, os.Stdout),
+		Backend:     niri.New(),
+		Zmx:         zmxclient.New(),
+		Store:       store,
+		Stdout:      os.Stdout,
+		Confirm:     herd.ConfirmPrompt(os.Stdin, os.Stdout),
+		SpawnWindow: func(cmd []string) error { return ghostty.Spawn("", cmd) },
 	}
 	ctx := context.Background()
 
@@ -60,6 +62,12 @@ func main() {
 	case "restore", "r":
 		name, force := parseNameForce("restore", "close what's open, reopen the saved layout", args)
 		fatalIf(app.Restore(ctx, name, force))
+	case "restore-in-place":
+		// Internal: what Restore relaunches into a new window to run.
+		// Not listed in usageText or completions -- not meant to be
+		// typed directly.
+		name, force := parseNameForce("restore-in-place", "perform a restore in the current window", args)
+		fatalIf(app.RestoreInPlace(ctx, name, force))
 	case "show", "sh":
 		fatalIf(app.Show(parseName("show", "print a saved snapshot's contents", args)))
 	case "list", "l":

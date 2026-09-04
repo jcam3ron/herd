@@ -79,7 +79,8 @@ type App struct {
 	// Confirm asks the user a yes/no question before a destructive
 	// action (closing a window with no zmx session). It returns true to
 	// proceed.
-	Confirm func(prompt string) bool
+	Confirm     func(prompt string) bool
+	SpawnWindow func(cmd []string) error
 }
 
 func (a *App) Save(ctx context.Context, name string, force bool) error {
@@ -120,11 +121,40 @@ func (a *App) Save(ctx context.Context, name string, force bool) error {
 	return nil
 }
 
+// Restore relaunches itself in a new window to perform the actual
+// restore there (RestoreInPlace), rather than doing the work in the
+// window it was invoked from.
 func (a *App) Restore(ctx context.Context, name string, force bool) error {
-	if session := os.Getenv("ZMX_SESSION"); session != "" {
-		return fmt.Errorf("refusing to restore from inside zmx session %q; run herd restore from a plain terminal instead", session)
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("couldn't find herd's own binary to relaunch it: %w", err)
 	}
+	restoreCmd := []string{exe, "restore-in-place"}
+	if force {
+		restoreCmd = append(restoreCmd, "--force")
+	}
+	restoreCmd = append(restoreCmd, name)
+	// Run through a shell that falls back to an interactive login shell
+	// once the restore command exits, no matter why -- success on a
+	// plain reused slot (nothing further to run), a failure, or later
+	// once an exec'd `zmx attach` itself exits. Without this, the window
+	// would run the restore command directly as its foreground process,
+	// and ghostty closes a window the instant its foreground process
+	// exits.
+	cmd := append([]string{"sh", "-c", `"$@"; exec "${SHELL:-/bin/sh}" -l`, "sh"}, restoreCmd...)
+	if err := a.SpawnWindow(cmd); err != nil {
+		return fmt.Errorf("couldn't open a new window to restore in: %w", err)
+	}
+	fmt.Fprintf(a.Stdout, "restoring %q in a new window\n", name)
+	return nil
+}
 
+// RestoreInPlace does the actual work: closing what's open and
+// respawning the saved layout, treating the window it runs in as the
+// snapshot's first window (see backend.Reuse). It's meant to be invoked
+// only via the internal "restore-in-place" CLI command that Restore
+// relaunches into, not called directly.
+func (a *App) RestoreInPlace(ctx context.Context, name string, force bool) error {
 	snap, err := a.Store.Load(name)
 	if err != nil {
 		return err
