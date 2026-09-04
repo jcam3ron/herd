@@ -100,7 +100,7 @@ func TestRestoreInPlaceExcludesOwnWindow(t *testing.T) {
 		Confirm: func(string) bool { return true },
 	}
 
-	if err := app.RestoreInPlace(context.Background(), "proj", false); err != nil {
+	if err := app.RestoreInPlace(context.Background(), "proj"); err != nil {
 		t.Fatalf("RestoreInPlace: %v", err)
 	}
 
@@ -175,13 +175,12 @@ func TestRestoreInPlaceReusedSlotPlain(t *testing.T) {
 		Zmx:     zmx,
 		Store:   store,
 		Stdout:  io.Discard,
-		Confirm: func(string) bool { return true },
 	}
 
 	// The reused slot is plain (id "1"), so it's excluded from raws
-	// before classification -- there's nothing left to warn about or
-	// confirm, and Confirm should never be consulted.
-	if err := app.RestoreInPlace(context.Background(), "proj", false); err != nil {
+	// before classification -- there's nothing left to close or spawn
+	// for it.
+	if err := app.RestoreInPlace(context.Background(), "proj"); err != nil {
 		t.Fatalf("RestoreInPlace: %v", err)
 	}
 
@@ -202,37 +201,100 @@ func TestRestoreInPlaceReusedSlotPlain(t *testing.T) {
 	}
 }
 
-func TestRestoreInPlaceForceSkipsConfirm(t *testing.T) {
+// TestRestoreIgnoresOwnWindowForContentWarning is the fix for the bug
+// where running `herd restore` from a plain, zmx-less terminal (the
+// normal case) always triggered the "will lose content" warning: the
+// window Restore was invoked from is not yet excluded from the window
+// list the way RestoreInPlace excludes its own (new) window, so it was
+// counted as content that would be lost. Confirm always declines here,
+// so if it were consulted at all, Restore would abort.
+func TestRestoreIgnoresOwnWindowForContentWarning(t *testing.T) {
 	fb := &fakeBackend{
 		name: "niri",
 		windows: []backend.RawWindow{
-			{ID: "2", Title: "no zmx session here"},
+			{ID: "1", Title: "invoking shell", Focused: true},
 		},
 	}
 	store := &snapshot.Store{Dir: t.TempDir()}
-	snap := snapshot.Snapshot{
-		Backend: "niri",
-		Name:    "proj",
-		Windows: []backend.PlannedWindow{
-			{Kind: "plain", Title: "no zmx session here", Layout: []byte(`{"col":1,"row":1}`)},
+	seedSnapshot(t, store, "proj")
+
+	spawned := false
+	app := &App{
+		Backend:     fb,
+		Zmx:         fakeZmx(nil),
+		Store:       store,
+		Stdout:      io.Discard,
+		Confirm:     func(string) bool { return false },
+		SpawnWindow: func([]string) error { spawned = true; return nil },
+	}
+
+	if err := app.Restore(context.Background(), "proj", false); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if !spawned {
+		t.Error("SpawnWindow was not called: Confirm must have been (wrongly) consulted about the invoking window")
+	}
+}
+
+// TestRestoreWarnsAboutOtherPlainWindows confirms the content-loss check
+// still fires for windows other than the one Restore was invoked from.
+func TestRestoreWarnsAboutOtherPlainWindows(t *testing.T) {
+	fb := &fakeBackend{
+		name: "niri",
+		windows: []backend.RawWindow{
+			{ID: "1", Title: "invoking shell", Focused: true},
+			{ID: "2", Title: "unrelated plain terminal"},
 		},
 	}
-	if err := store.Save(snap); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	store := &snapshot.Store{Dir: t.TempDir()}
+	seedSnapshot(t, store, "proj")
 
+	spawned := false
 	app := &App{
-		Backend: fb,
-		Zmx:     fakeZmx(nil),
-		Store:   store,
-		Stdout:  io.Discard,
-		// Confirm always declines: force must bypass it entirely, not
-		// just default it to "yes".
-		Confirm: func(string) bool { return false },
+		Backend:     fb,
+		Zmx:         fakeZmx(nil),
+		Store:       store,
+		Stdout:      io.Discard,
+		Confirm:     func(string) bool { return false },
+		SpawnWindow: func([]string) error { spawned = true; return nil },
 	}
 
-	if err := app.RestoreInPlace(context.Background(), "proj", true); err != nil {
-		t.Fatalf("RestoreInPlace with force=true: %v", err)
+	if err := app.Restore(context.Background(), "proj", false); err == nil {
+		t.Fatal("Restore: expected an error from a declined confirm, got nil")
+	}
+	if spawned {
+		t.Error("SpawnWindow was called despite the confirm being declined")
+	}
+}
+
+// TestRestoreForceSkipsConfirm confirms --force bypasses the
+// content-loss confirm entirely, not just defaults it to "yes".
+func TestRestoreForceSkipsConfirm(t *testing.T) {
+	fb := &fakeBackend{
+		name: "niri",
+		windows: []backend.RawWindow{
+			{ID: "1", Title: "invoking shell", Focused: true},
+			{ID: "2", Title: "unrelated plain terminal"},
+		},
+	}
+	store := &snapshot.Store{Dir: t.TempDir()}
+	seedSnapshot(t, store, "proj")
+
+	spawned := false
+	app := &App{
+		Backend:     fb,
+		Zmx:         fakeZmx(nil),
+		Store:       store,
+		Stdout:      io.Discard,
+		Confirm:     func(string) bool { return false },
+		SpawnWindow: func([]string) error { spawned = true; return nil },
+	}
+
+	if err := app.Restore(context.Background(), "proj", true); err != nil {
+		t.Fatalf("Restore with force=true: %v", err)
+	}
+	if !spawned {
+		t.Error("SpawnWindow was not called despite force=true")
 	}
 }
 
@@ -301,6 +363,7 @@ func TestRestoreRelaunches(t *testing.T) {
 	var spawned []string
 	app := &App{
 		Backend:     &fakeBackend{name: "niri"},
+		Zmx:         fakeZmx(nil),
 		Store:       store,
 		Stdout:      io.Discard,
 		SpawnWindow: func(cmd []string) error { spawned = cmd; return nil },
@@ -318,36 +381,9 @@ func TestRestoreRelaunches(t *testing.T) {
 		t.Fatalf("spawned command = %v, want a sh -c wrapper", spawned)
 	}
 	inner := spawned[4:]
-	if len(inner) < 2 || inner[1] != "restore-in-place" {
-		t.Fatalf("wrapped command = %v, want [<exe> restore-in-place ...]", inner)
-	}
-	// --force must come before the name: herd's flag parsing stops at
-	// the first non-flag argument.
-	if inner[len(inner)-1] != "anything" {
-		t.Errorf("wrapped command = %v, want name last", inner)
-	}
-	if !slices.Contains(inner, "--force") {
-		t.Errorf("wrapped command = %v, want --force propagated", inner)
-	}
-}
-
-func TestRestoreOmitsForceWhenUnset(t *testing.T) {
-	store := &snapshot.Store{Dir: t.TempDir()}
-	seedSnapshot(t, store, "anything")
-
-	var spawned []string
-	app := &App{
-		Backend:     &fakeBackend{name: "niri"},
-		Store:       store,
-		Stdout:      io.Discard,
-		SpawnWindow: func(cmd []string) error { spawned = cmd; return nil },
-	}
-
-	if err := app.Restore(context.Background(), "anything", false); err != nil {
-		t.Fatalf("Restore: %v", err)
-	}
-	if slices.Contains(spawned, "--force") {
-		t.Errorf("spawned command = %v, want no --force", spawned)
+	want := []string{inner[0], "restore-in-place", "anything"}
+	if len(inner) != 3 || !slices.Equal(inner, want) {
+		t.Fatalf("wrapped command = %v, want [<exe> restore-in-place anything]", inner)
 	}
 }
 
@@ -357,6 +393,7 @@ func TestRestoreSurfacesSpawnFailure(t *testing.T) {
 
 	app := &App{
 		Backend:     &fakeBackend{name: "niri"},
+		Zmx:         fakeZmx(nil),
 		Store:       store,
 		Stdout:      io.Discard,
 		SpawnWindow: func([]string) error { return errors.New("no ghostty on PATH") },

@@ -66,8 +66,8 @@ func main() {
 		// Internal: what Restore relaunches into a new window to run.
 		// Not listed in usageText or completions -- not meant to be
 		// typed directly.
-		name, force := parseNameForce("restore-in-place", "perform a restore in the current window", args)
-		fatalIf(app.RestoreInPlace(ctx, name, force))
+		name := parseName("restore-in-place", "perform a restore in the current window", args)
+		fatalIf(app.RestoreInPlace(ctx, name))
 	case "show", "sh":
 		fatalIf(app.Show(parseName("show", "print a saved snapshot's contents", args)))
 	case "list", "l":

@@ -111,7 +111,10 @@ func (a *App) Save(ctx context.Context, name string, force bool) error {
 // window it was invoked from. It checks upfront that name is actually
 // restorable -- a bad name, or one saved for a different backend, should
 // fail immediately in the calling window, not spawn a window only to
-// fail inside it.
+// fail inside it. It also runs the "will lose content" check here,
+// before spawning: doing it from RestoreInPlace (after the new window
+// exists) would count the window Restore was invoked from as content to
+// be lost, when losing it is implicit in having just run this command.
 func (a *App) Restore(ctx context.Context, name string, force bool) error {
 	snap, err := a.Store.Load(name)
 	if err != nil {
@@ -121,15 +124,40 @@ func (a *App) Restore(ctx context.Context, name string, force bool) error {
 		return fmt.Errorf("snapshot %q was saved with backend %q, active backend is %q", name, snap.Backend, a.Backend.Name())
 	}
 
+	raws, err := a.Backend.ListWindows(ctx)
+	if err != nil {
+		return err
+	}
+	// The focused window is the one Restore was invoked from -- closing
+	// it is implicit in running this command, so it never counts as
+	// content that would be lost.
+	raws = slices.DeleteFunc(raws, func(w backend.RawWindow) bool { return w.Focused })
+
+	current, err := classify(ctx, a.Zmx, raws)
+	if err != nil {
+		return err
+	}
+	var plain []classified
+	for _, c := range current {
+		if c.Kind == "plain" {
+			plain = append(plain, c)
+		}
+	}
+	if len(plain) > 0 {
+		fmt.Fprintln(a.Stdout, "The following terminal(s) in this workspace have no zmx session and will lose their content:")
+		for _, c := range plain {
+			fmt.Fprintf(a.Stdout, "  - %s\n", c.Title)
+		}
+		if !force && !a.Confirm("Close them anyway?") {
+			return fmt.Errorf("restore aborted")
+		}
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("couldn't find herd's own binary to relaunch it: %w", err)
 	}
-	restoreCmd := []string{exe, "restore-in-place"}
-	if force {
-		restoreCmd = append(restoreCmd, "--force")
-	}
-	restoreCmd = append(restoreCmd, name)
+	restoreCmd := []string{exe, "restore-in-place", name}
 	// Run through a shell that falls back to an interactive login shell
 	// once the restore command exits, no matter why -- success on a
 	// plain reused slot (nothing further to run), a failure, or later
@@ -149,8 +177,10 @@ func (a *App) Restore(ctx context.Context, name string, force bool) error {
 // respawning the saved layout, treating the window it runs in as the
 // snapshot's first window (see backend.Reuse). It's meant to be invoked
 // only via the internal "restore-in-place" CLI command that Restore
-// relaunches into, not called directly.
-func (a *App) RestoreInPlace(ctx context.Context, name string, force bool) error {
+// relaunches into, not called directly -- Restore has already run (and
+// gotten the user past) the "will lose content" check, so this doesn't
+// repeat it.
+func (a *App) RestoreInPlace(ctx context.Context, name string) error {
 	snap, err := a.Store.Load(name)
 	if err != nil {
 		return err
@@ -175,22 +205,6 @@ func (a *App) RestoreInPlace(ctx context.Context, name string, force bool) error
 	current, err := classify(ctx, a.Zmx, raws)
 	if err != nil {
 		return err
-	}
-
-	var plain []classified
-	for _, c := range current {
-		if c.Kind == "plain" {
-			plain = append(plain, c)
-		}
-	}
-	if len(plain) > 0 {
-		fmt.Fprintln(a.Stdout, "The following terminal(s) in this workspace have no zmx session and will lose their content:")
-		for _, c := range plain {
-			fmt.Fprintf(a.Stdout, "  - %s\n", c.Title)
-		}
-		if !force && !a.Confirm("Close them anyway?") {
-			return fmt.Errorf("restore aborted")
-		}
 	}
 
 	// Closing a zmx-backed window just hangs up the client; the session
