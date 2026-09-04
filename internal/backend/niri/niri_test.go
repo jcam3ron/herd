@@ -1,9 +1,15 @@
 package niri
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/jcam3ron/herd/internal/backend"
+	"github.com/jcam3ron/herd/internal/ghostty"
 )
 
 // sampleWindows mirrors real `niri msg -j windows` output captured from a
@@ -67,5 +73,113 @@ func TestListWindows(t *testing.T) {
 		if w.Focused != want {
 			t.Errorf("window %s: Focused = %v, want %v", w.ID, w.Focused, want)
 		}
+	}
+}
+
+// mkWindow builds a ghostty window in workspace ws at (col, row) --
+// enough of niri's `windows` payload for the fields Apply's stacking
+// heuristic reads.
+func mkWindow(id, ws, col, row int) window {
+	w := window{ID: id, AppID: ghostty.AppID, WorkspaceID: ws}
+	w.Layout.PosInScrollingLayout = [2]int{col, row}
+	return w
+}
+
+// runFake answers the "niri msg" subcommands Apply issues against a
+// single focused workspace (id 4) and a live windows list, recording
+// action calls so the stacking decision can be asserted on.
+type runFake struct {
+	windows      []window
+	focusCalls   []string
+	consumeCalls int
+}
+
+func (f *runFake) run(_ context.Context, name string, args ...string) ([]byte, error) {
+	if name != "niri" || args[0] != "msg" {
+		return nil, nil
+	}
+	switch {
+	case args[1] == "-j" && args[2] == "workspaces":
+		return []byte(`[{"id":4,"is_focused":true}]`), nil
+	case args[1] == "-j" && args[2] == "windows":
+		return json.Marshal(f.windows)
+	case args[1] == "action" && args[2] == "focus-window":
+		f.focusCalls = append(f.focusCalls, args[4])
+		return nil, nil
+	case args[1] == "action" && args[2] == "consume-window-into-column":
+		f.consumeCalls++
+		return nil, nil
+	}
+	return nil, nil
+}
+
+func mustLayout(t *testing.T, col, row int) []byte {
+	t.Helper()
+	b, err := json.Marshal(layout{Col: col, Row: row})
+	if err != nil {
+		t.Fatalf("marshal layout: %v", err)
+	}
+	return b
+}
+
+func TestApplyFoldsAdjacentColumn(t *testing.T) {
+	f := &runFake{windows: []window{mkWindow(1, 4, 1, 1)}} // reused window: id 1, col 1
+	b := &Backend{
+		Run: f.run,
+		Spawn: func(string, []string) error {
+			// Lands one column right of the reused window -- adjacent,
+			// so Apply should fold it into that column.
+			f.windows = append(f.windows, mkWindow(2, 4, 2, 1))
+			return nil
+		},
+	}
+
+	reuse := &backend.Reuse{ID: "1", Window: backend.PlannedWindow{Layout: mustLayout(t, 1, 1)}}
+	spawn := []backend.PlannedWindow{{Kind: "plain", Layout: mustLayout(t, 1, 1)}}
+
+	ids, err := b.Apply(context.Background(), spawn, reuse)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "2" {
+		t.Fatalf("ids = %v, want [\"2\"]", ids)
+	}
+	if !slices.Equal(f.focusCalls, []string{"1"}) {
+		t.Errorf("focus-window calls = %v, want [\"1\"]", f.focusCalls)
+	}
+	if f.consumeCalls != 1 {
+		t.Errorf("consume-window-into-column calls = %d, want 1", f.consumeCalls)
+	}
+}
+
+func TestApplyWarnsOnNonAdjacentColumn(t *testing.T) {
+	f := &runFake{windows: []window{mkWindow(1, 4, 1, 1)}} // reused window: id 1, col 1
+	var out bytes.Buffer
+	b := &Backend{
+		Run: f.run,
+		Spawn: func(string, []string) error {
+			// Lands far from the reused window -- not adjacent, so Apply
+			// must not fold it and should warn instead.
+			f.windows = append(f.windows, mkWindow(2, 4, 5, 1))
+			return nil
+		},
+		Out: &out,
+	}
+
+	reuse := &backend.Reuse{ID: "1", Window: backend.PlannedWindow{Layout: mustLayout(t, 1, 1)}}
+	spawn := []backend.PlannedWindow{{Kind: "plain", Layout: mustLayout(t, 1, 1)}}
+
+	ids, err := b.Apply(context.Background(), spawn, reuse)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "2" {
+		t.Fatalf("ids = %v, want [\"2\"]", ids)
+	}
+	if len(f.focusCalls) != 0 || f.consumeCalls != 0 {
+		t.Errorf("focus-window/consume-window-into-column calls = %v/%d, want none", f.focusCalls, f.consumeCalls)
+	}
+	if !strings.Contains(out.String(), "could not stack") {
+		t.Errorf("Out = %q, want a stacking warning", out.String())
 	}
 }

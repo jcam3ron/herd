@@ -36,3 +36,11 @@ func TestCleanEnvDoesNotMatchPrefix(t *testing.T) {
 		t.Errorf("cleanEnv(%v) = %v, want ZMX_SESSION_ID left untouched", in, got)
 	}
 }
+
+func TestWrapWithShellFallback(t *testing.T) {
+	got := wrapWithShellFallback([]string{"herd", "restore-in-place", "myproj"})
+	want := []string{"sh", "-c", `"$@"; exec "${SHELL:-/bin/sh}" -l`, "sh", "herd", "restore-in-place", "myproj"}
+	if !slices.Equal(got, want) {
+		t.Errorf("wrapWithShellFallback(...) = %v, want %v", got, want)
+	}
+}

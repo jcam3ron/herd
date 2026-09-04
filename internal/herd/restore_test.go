@@ -220,19 +220,19 @@ func TestRestoreIgnoresOwnWindowForContentWarning(t *testing.T) {
 
 	spawned := false
 	app := &App{
-		Backend:     fb,
-		Zmx:         fakeZmx(nil),
-		Store:       store,
-		Stdout:      io.Discard,
-		Confirm:     func(string) bool { return false },
-		SpawnWindow: func([]string) error { spawned = true; return nil },
+		Backend:  fb,
+		Zmx:      fakeZmx(nil),
+		Store:    store,
+		Stdout:   io.Discard,
+		Confirm:  func(string) bool { return false },
+		Relaunch: func(context.Context, string) error { spawned = true; return nil },
 	}
 
 	if err := app.Restore(context.Background(), "proj", false); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 	if !spawned {
-		t.Error("SpawnWindow was not called: Confirm must have been (wrongly) consulted about the invoking window")
+		t.Error("Relaunch was not called: Confirm must have been (wrongly) consulted about the invoking window")
 	}
 }
 
@@ -251,19 +251,19 @@ func TestRestoreWarnsAboutOtherPlainWindows(t *testing.T) {
 
 	spawned := false
 	app := &App{
-		Backend:     fb,
-		Zmx:         fakeZmx(nil),
-		Store:       store,
-		Stdout:      io.Discard,
-		Confirm:     func(string) bool { return false },
-		SpawnWindow: func([]string) error { spawned = true; return nil },
+		Backend:  fb,
+		Zmx:      fakeZmx(nil),
+		Store:    store,
+		Stdout:   io.Discard,
+		Confirm:  func(string) bool { return false },
+		Relaunch: func(context.Context, string) error { spawned = true; return nil },
 	}
 
 	if err := app.Restore(context.Background(), "proj", false); err == nil {
 		t.Fatal("Restore: expected an error from a declined confirm, got nil")
 	}
 	if spawned {
-		t.Error("SpawnWindow was called despite the confirm being declined")
+		t.Error("Relaunch was called despite the confirm being declined")
 	}
 }
 
@@ -282,19 +282,19 @@ func TestRestoreForceSkipsConfirm(t *testing.T) {
 
 	spawned := false
 	app := &App{
-		Backend:     fb,
-		Zmx:         fakeZmx(nil),
-		Store:       store,
-		Stdout:      io.Discard,
-		Confirm:     func(string) bool { return false },
-		SpawnWindow: func([]string) error { spawned = true; return nil },
+		Backend:  fb,
+		Zmx:      fakeZmx(nil),
+		Store:    store,
+		Stdout:   io.Discard,
+		Confirm:  func(string) bool { return false },
+		Relaunch: func(context.Context, string) error { spawned = true; return nil },
 	}
 
 	if err := app.Restore(context.Background(), "proj", true); err != nil {
 		t.Fatalf("Restore with force=true: %v", err)
 	}
 	if !spawned {
-		t.Error("SpawnWindow was not called despite force=true")
+		t.Error("Relaunch was not called despite force=true")
 	}
 }
 
@@ -320,39 +320,44 @@ func seedSnapshot(t *testing.T, store *snapshot.Store, name string) {
 func TestRestoreValidatesBeforeSpawning(t *testing.T) {
 	spawnCalled := false
 	app := &App{
-		Backend:     &fakeBackend{name: "niri"},
-		Store:       &snapshot.Store{Dir: t.TempDir()},
-		Stdout:      io.Discard,
-		SpawnWindow: func([]string) error { spawnCalled = true; return nil },
+		Backend:  &fakeBackend{name: "niri"},
+		Store:    &snapshot.Store{Dir: t.TempDir()},
+		Stdout:   io.Discard,
+		Relaunch: func(context.Context, string) error { spawnCalled = true; return nil },
 	}
 
 	if err := app.Restore(context.Background(), "nonexistent", false); err == nil {
 		t.Fatal("Restore of a nonexistent snapshot: expected an error, got nil")
 	}
 	if spawnCalled {
-		t.Error("SpawnWindow was called despite the snapshot not existing")
+		t.Error("Relaunch was called despite the snapshot not existing")
 	}
 }
 
 func TestRestoreValidatesBackendBeforeSpawning(t *testing.T) {
 	spawnCalled := false
 	store := &snapshot.Store{Dir: t.TempDir()}
-	if err := store.Save(snapshot.Snapshot{Backend: "omniwm", Name: "proj"}); err != nil {
+	snap := snapshot.Snapshot{
+		Backend: "omniwm",
+		Name:    "proj",
+		Windows: []backend.PlannedWindow{{Kind: "plain", Title: "x", Layout: []byte(`{}`)}},
+	}
+	if err := store.Save(snap); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
 	app := &App{
-		Backend:     &fakeBackend{name: "niri"},
-		Store:       store,
-		Stdout:      io.Discard,
-		SpawnWindow: func([]string) error { spawnCalled = true; return nil },
+		Backend:  &fakeBackend{name: "niri"},
+		Store:    store,
+		Stdout:   io.Discard,
+		Relaunch: func(context.Context, string) error { spawnCalled = true; return nil },
 	}
 
 	if err := app.Restore(context.Background(), "proj", false); err == nil {
 		t.Fatal("Restore of a snapshot saved for a different backend: expected an error, got nil")
 	}
 	if spawnCalled {
-		t.Error("SpawnWindow was called despite the backend mismatch")
+		t.Error("Relaunch was called despite the backend mismatch")
 	}
 }
 
@@ -360,30 +365,23 @@ func TestRestoreRelaunches(t *testing.T) {
 	store := &snapshot.Store{Dir: t.TempDir()}
 	seedSnapshot(t, store, "anything")
 
-	var spawned []string
+	var relaunchedName string
 	app := &App{
-		Backend:     &fakeBackend{name: "niri"},
-		Zmx:         fakeZmx(nil),
-		Store:       store,
-		Stdout:      io.Discard,
-		SpawnWindow: func(cmd []string) error { spawned = cmd; return nil },
+		Backend: &fakeBackend{name: "niri"},
+		Zmx:     fakeZmx(nil),
+		Store:   store,
+		Stdout:  io.Discard,
+		Relaunch: func(_ context.Context, name string) error {
+			relaunchedName = name
+			return nil
+		},
 	}
 
 	if err := app.Restore(context.Background(), "anything", true); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
-
-	// The restore-in-place invocation runs inside a shell wrapper (so
-	// the window falls back to an interactive shell instead of closing
-	// once it exits) -- confirm the wrapped command itself, not the
-	// wrapper.
-	if len(spawned) < 7 || spawned[0] != "sh" || spawned[1] != "-c" {
-		t.Fatalf("spawned command = %v, want a sh -c wrapper", spawned)
-	}
-	inner := spawned[4:]
-	want := []string{inner[0], "restore-in-place", "anything"}
-	if len(inner) != 3 || !slices.Equal(inner, want) {
-		t.Fatalf("wrapped command = %v, want [<exe> restore-in-place anything]", inner)
+	if relaunchedName != "anything" {
+		t.Errorf("Relaunch called with name %q, want %q", relaunchedName, "anything")
 	}
 }
 
@@ -392,14 +390,14 @@ func TestRestoreSurfacesSpawnFailure(t *testing.T) {
 	seedSnapshot(t, store, "anything")
 
 	app := &App{
-		Backend:     &fakeBackend{name: "niri"},
-		Zmx:         fakeZmx(nil),
-		Store:       store,
-		Stdout:      io.Discard,
-		SpawnWindow: func([]string) error { return errors.New("no ghostty on PATH") },
+		Backend:  &fakeBackend{name: "niri"},
+		Zmx:      fakeZmx(nil),
+		Store:    store,
+		Stdout:   io.Discard,
+		Relaunch: func(context.Context, string) error { return errors.New("no ghostty on PATH") },
 	}
 
 	if err := app.Restore(context.Background(), "anything", false); err == nil {
-		t.Fatal("Restore when SpawnWindow fails: expected an error, got nil")
+		t.Fatal("Restore when Relaunch fails: expected an error, got nil")
 	}
 }

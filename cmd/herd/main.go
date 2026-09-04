@@ -45,12 +45,12 @@ func main() {
 		fatal(err)
 	}
 	app := &herd.App{
-		Backend:     niri.New(),
-		Zmx:         zmxclient.New(),
-		Store:       store,
-		Stdout:      os.Stdout,
-		Confirm:     herd.ConfirmPrompt(os.Stdin, os.Stdout),
-		SpawnWindow: func(cmd []string) error { return ghostty.Spawn("", cmd) },
+		Backend:  niri.New(),
+		Zmx:      zmxclient.New(),
+		Store:    store,
+		Stdout:   os.Stdout,
+		Confirm:  herd.ConfirmPrompt(os.Stdin, os.Stdout),
+		Relaunch: relaunch,
 	}
 	ctx := context.Background()
 
@@ -84,6 +84,16 @@ func main() {
 
 func isHelp(s string) bool {
 	return s == "-h" || s == "--help" || s == "help"
+}
+
+// relaunch re-invokes herd's own "restore-in-place" command for name in
+// a new window (see herd.App.Relaunch).
+func relaunch(_ context.Context, name string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("couldn't find herd's own binary to relaunch it: %w", err)
+	}
+	return ghostty.SpawnFallingBackToShell("", []string{exe, "restore-in-place", name})
 }
 
 // newFlagSet builds a FlagSet whose -h/--help prints a one-line usage,

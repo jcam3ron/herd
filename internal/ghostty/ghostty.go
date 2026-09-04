@@ -41,6 +41,19 @@ func Spawn(workDir string, cmd []string) error {
 	return nil
 }
 
+// SpawnFallingBackToShell is Spawn, but wraps cmd so the window falls back
+// to an interactive login shell once cmd exits, no matter why -- success,
+// failure, or later once an exec'd process (e.g. `zmx attach`) itself
+// exits. Without this, ghostty closes the window the instant cmd's
+// foreground process exits.
+func SpawnFallingBackToShell(workDir string, cmd []string) error {
+	return Spawn(workDir, wrapWithShellFallback(cmd))
+}
+
+func wrapWithShellFallback(cmd []string) []string {
+	return append([]string{"sh", "-c", `"$@"; exec "${SHELL:-/bin/sh}" -l`, "sh"}, cmd...)
+}
+
 // cleanEnv is env with ZMX_SESSION stripped. A spawned window is a
 // genuinely new terminal, not a continuation of whatever spawned it, so
 // it should never inherit which zmx session (if any) its spawner

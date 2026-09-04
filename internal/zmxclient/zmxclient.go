@@ -1,6 +1,12 @@
 // Package zmxclient wraps the parts of the zmx CLI herd needs: listing
-// sessions and reading the last_window label the fish `zmx` wrapper sets
-// at attach time (see fish/zmx-wrapper.fish).
+// sessions and reading and writing the last_window label that ties a
+// window to a zmx session.
+//
+// This package is the sole source of truth for that label: herd never
+// reads or sets a window's title to figure out which zmx session (if
+// any) it belongs to. herd itself writes the label for windows it spawns
+// (see herd.App.RestoreInPlace); the shell `zmx` wrapper writes it for
+// sessions attached to manually (see shell/herd.fish).
 package zmxclient
 
 import (
@@ -65,9 +71,7 @@ func (c *Client) SetLastWindow(ctx context.Context, session, windowID string) er
 }
 
 // LastWindowLabels returns every session's last_window label as a map
-// from window id to session name. herd is the sole source of truth for
-// which window belongs to which zmx session; it never reads or sets the
-// window title.
+// from window id to session name.
 func (c *Client) LastWindowLabels(ctx context.Context) (map[string]string, error) {
 	sessions, err := c.Sessions(ctx)
 	if err != nil {

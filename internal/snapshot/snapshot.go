@@ -71,6 +71,11 @@ func (s *Store) Load(name string) (Snapshot, error) {
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return Snapshot{}, fmt.Errorf("decoding snapshot %q: %w", name, err)
 	}
+	// Save never writes a snapshot with no windows (see App.Save); a
+	// snapshot with none on disk is corrupt, not a valid empty one.
+	if len(snap.Windows) == 0 {
+		return Snapshot{}, fmt.Errorf("snapshot %q has no windows (corrupt?)", name)
+	}
 	return snap, nil
 }
 

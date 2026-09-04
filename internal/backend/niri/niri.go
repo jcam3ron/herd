@@ -64,6 +64,10 @@ type layout struct {
 
 type Backend struct {
 	Run run.Runner
+	// Spawn opens a ghostty window running cmd (or the default shell if
+	// cmd is empty). Injectable so Apply's column-folding heuristic can
+	// be exercised without a real ghostty instance.
+	Spawn func(workDir string, cmd []string) error
 	// WorkDir is the working directory for spawned ghostty windows that
 	// have no zmx session to attach to. "" uses ghostty's default.
 	WorkDir string
@@ -73,7 +77,7 @@ type Backend struct {
 }
 
 func New() *Backend {
-	return &Backend{Run: run.Exec}
+	return &Backend{Run: run.Exec, Spawn: ghostty.Spawn}
 }
 
 func (b *Backend) Name() string { return "niri" }
@@ -263,11 +267,11 @@ func (b *Backend) Apply(ctx context.Context, spawn []backend.PlannedWindow, reus
 
 		switch p.Kind {
 		case "zmx":
-			if err := ghostty.Spawn(b.WorkDir, []string{"zmx", "attach", p.Session}); err != nil {
+			if err := b.Spawn(b.WorkDir, []string{"zmx", "attach", p.Session}); err != nil {
 				return nil, err
 			}
 		default:
-			if err := ghostty.Spawn(b.WorkDir, nil); err != nil {
+			if err := b.Spawn(b.WorkDir, nil); err != nil {
 				return nil, err
 			}
 		}

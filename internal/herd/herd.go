@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"slices"
 	"time"
 
@@ -32,11 +31,8 @@ type classified struct {
 	ID string
 }
 
-// classify tags each raw window as zmx-backed (by its last_window label)
-// or plain. herd never reads or sets the window title: it's the sole
-// source of truth for which window belongs to which zmx session, set by
-// itself for windows it spawns (see RestoreInPlace) and by the shell
-// `zmx` wrapper for windows attached manually (see shell/herd.fish).
+// classify tags each raw window as zmx-backed (by its last_window label,
+// see the zmxclient package doc) or plain.
 func classify(ctx context.Context, zmx *zmxclient.Client, raws []backend.RawWindow) ([]classified, error) {
 	labels, err := zmx.LastWindowLabels(ctx)
 	if err != nil {
@@ -54,6 +50,17 @@ func classify(ctx context.Context, zmx *zmxclient.Client, raws []backend.RawWind
 	return out, nil
 }
 
+// excludeFocused removes the focused window (if any) from raws, returning
+// its id -- the window herd itself is running in, whether that's Restore
+// checking what it may close, or RestoreInPlace protecting itself from
+// closing its own window.
+func excludeFocused(raws []backend.RawWindow) (rest []backend.RawWindow, focusedID string) {
+	if i := slices.IndexFunc(raws, func(w backend.RawWindow) bool { return w.Focused }); i >= 0 {
+		focusedID = raws[i].ID
+	}
+	return slices.DeleteFunc(raws, func(w backend.RawWindow) bool { return w.Focused }), focusedID
+}
+
 // App wires a Backend, a zmx client and a snapshot Store into the
 // save/restore/list/rm operations.
 type App struct {
@@ -64,8 +71,11 @@ type App struct {
 	// Confirm asks the user a yes/no question before a destructive
 	// action (closing a window with no zmx session). It returns true to
 	// proceed.
-	Confirm     func(prompt string) bool
-	SpawnWindow func(cmd []string) error
+	Confirm func(prompt string) bool
+	// Relaunch re-invokes herd's own "restore-in-place" command for name
+	// in a new window (see cmd/herd/main.go). Restore calls it once it's
+	// established the restore may proceed.
+	Relaunch func(ctx context.Context, name string) error
 }
 
 func (a *App) Save(ctx context.Context, name string, force bool) error {
@@ -106,39 +116,59 @@ func (a *App) Save(ctx context.Context, name string, force bool) error {
 	return nil
 }
 
-// Restore relaunches itself in a new window to perform the actual
-// restore there (RestoreInPlace), rather than doing the work in the
-// window it was invoked from. It checks upfront that name is actually
-// restorable -- a bad name, or one saved for a different backend, should
-// fail immediately in the calling window, not spawn a window only to
-// fail inside it. It also runs the "will lose content" check here,
-// before spawning: doing it from RestoreInPlace (after the new window
-// exists) would count the window Restore was invoked from as content to
-// be lost, when losing it is implicit in having just run this command.
-func (a *App) Restore(ctx context.Context, name string, force bool) error {
+// restorePlan is the preamble both Restore and RestoreInPlace need: the
+// loaded snapshot, the workspace's other windows (everything but the one
+// herd itself is running in) classified as zmx-backed or plain, and that
+// window's id, if any. Restore uses it to say what closing would lose;
+// RestoreInPlace uses it to actually close and replace those windows.
+type restorePlan struct {
+	snap    snapshot.Snapshot
+	current []classified
+	ownID   string
+}
+
+// planRestore loads name and validates it's restorable on the active
+// backend -- a bad name, or one saved for a different backend, must be
+// reported before anything is closed or spawned, not discovered partway
+// through.
+func (a *App) planRestore(ctx context.Context, name string) (restorePlan, error) {
 	snap, err := a.Store.Load(name)
 	if err != nil {
-		return err
+		return restorePlan{}, err
 	}
 	if snap.Backend != a.Backend.Name() {
-		return fmt.Errorf("snapshot %q was saved with backend %q, active backend is %q", name, snap.Backend, a.Backend.Name())
+		return restorePlan{}, fmt.Errorf("snapshot %q was saved with backend %q, active backend is %q", name, snap.Backend, a.Backend.Name())
 	}
 
 	raws, err := a.Backend.ListWindows(ctx)
 	if err != nil {
-		return err
+		return restorePlan{}, err
 	}
-	// The focused window is the one Restore was invoked from -- closing
-	// it is implicit in running this command, so it never counts as
-	// content that would be lost.
-	raws = slices.DeleteFunc(raws, func(w backend.RawWindow) bool { return w.Focused })
+	raws, ownID := excludeFocused(raws)
 
 	current, err := classify(ctx, a.Zmx, raws)
 	if err != nil {
+		return restorePlan{}, err
+	}
+
+	return restorePlan{snap: snap, current: current, ownID: ownID}, nil
+}
+
+// Restore relaunches itself in a new window to perform the actual
+// restore there (RestoreInPlace), rather than doing the work in the
+// window it was invoked from. It runs the "will lose content" check
+// here, before spawning: doing it from RestoreInPlace (after the new
+// window exists) would count the window Restore was invoked from as
+// content to be lost, when losing it is implicit in having just run
+// this command -- planRestore already excludes it for that reason.
+func (a *App) Restore(ctx context.Context, name string, force bool) error {
+	plan, err := a.planRestore(ctx, name)
+	if err != nil {
 		return err
 	}
+
 	var plain []classified
-	for _, c := range current {
+	for _, c := range plan.current {
 		if c.Kind == "plain" {
 			plain = append(plain, c)
 		}
@@ -153,20 +183,7 @@ func (a *App) Restore(ctx context.Context, name string, force bool) error {
 		}
 	}
 
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("couldn't find herd's own binary to relaunch it: %w", err)
-	}
-	restoreCmd := []string{exe, "restore-in-place", name}
-	// Run through a shell that falls back to an interactive login shell
-	// once the restore command exits, no matter why -- success on a
-	// plain reused slot (nothing further to run), a failure, or later
-	// once an exec'd `zmx attach` itself exits. Without this, the window
-	// would run the restore command directly as its foreground process,
-	// and ghostty closes a window the instant its foreground process
-	// exits.
-	cmd := append([]string{"sh", "-c", `"$@"; exec "${SHELL:-/bin/sh}" -l`, "sh"}, restoreCmd...)
-	if err := a.SpawnWindow(cmd); err != nil {
+	if err := a.Relaunch(ctx, name); err != nil {
 		return fmt.Errorf("couldn't open a new window to restore in: %w", err)
 	}
 	fmt.Fprintf(a.Stdout, "restoring %q in a new window\n", name)
@@ -181,31 +198,11 @@ func (a *App) Restore(ctx context.Context, name string, force bool) error {
 // gotten the user past) the "will lose content" check, so this doesn't
 // repeat it.
 func (a *App) RestoreInPlace(ctx context.Context, name string) error {
-	snap, err := a.Store.Load(name)
+	plan, err := a.planRestore(ctx, name)
 	if err != nil {
 		return err
 	}
-	if snap.Backend != a.Backend.Name() {
-		return fmt.Errorf("snapshot %q was saved with backend %q, active backend is %q", name, snap.Backend, a.Backend.Name())
-	}
-
-	raws, err := a.Backend.ListWindows(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Never touch the window herd itself is running in -- closing it
-	// would kill this process mid-restore.
-	var ownID string
-	if i := slices.IndexFunc(raws, func(w backend.RawWindow) bool { return w.Focused }); i >= 0 {
-		ownID = raws[i].ID
-		raws = slices.DeleteFunc(raws, func(w backend.RawWindow) bool { return w.ID == ownID })
-	}
-
-	current, err := classify(ctx, a.Zmx, raws)
-	if err != nil {
-		return err
-	}
+	snap, current, ownID := plan.snap, plan.current, plan.ownID
 
 	// Closing a zmx-backed window just hangs up the client; the session
 	// keeps running in the zmx daemon (zmx has no remote detach-by-name,
