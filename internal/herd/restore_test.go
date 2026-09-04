@@ -198,17 +198,73 @@ func TestRestoreInPlaceForceSkipsConfirm(t *testing.T) {
 // Restore always relaunches into a new window running "restore-in-place"
 // -- there's no special-casing based on how or where it was invoked from
 // (in particular, no $ZMX_SESSION check), so these tests don't set it.
+// Each seeds a real snapshot: Restore validates upfront (name exists,
+// backend matches) before ever spawning anything, so an unseeded store
+// would fail before reaching the behavior under test.
+
+func seedSnapshot(t *testing.T, store *snapshot.Store, name string) {
+	t.Helper()
+	snap := snapshot.Snapshot{
+		Backend: "niri",
+		Name:    name,
+		Windows: []backend.PlannedWindow{{Kind: "plain", Title: "x", Layout: []byte(`{}`)}},
+	}
+	if err := store.Save(snap); err != nil {
+		t.Fatalf("seedSnapshot: %v", err)
+	}
+}
+
+func TestRestoreValidatesBeforeSpawning(t *testing.T) {
+	spawnCalled := false
+	app := &App{
+		Backend:     &fakeBackend{name: "niri"},
+		Store:       &snapshot.Store{Dir: t.TempDir()},
+		Stdout:      io.Discard,
+		SpawnWindow: func([]string) error { spawnCalled = true; return nil },
+	}
+
+	if err := app.Restore(context.Background(), "nonexistent", false); err == nil {
+		t.Fatal("Restore of a nonexistent snapshot: expected an error, got nil")
+	}
+	if spawnCalled {
+		t.Error("SpawnWindow was called despite the snapshot not existing")
+	}
+}
+
+func TestRestoreValidatesBackendBeforeSpawning(t *testing.T) {
+	spawnCalled := false
+	store := &snapshot.Store{Dir: t.TempDir()}
+	if err := store.Save(snapshot.Snapshot{Backend: "omniwm", Name: "proj"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	app := &App{
+		Backend:     &fakeBackend{name: "niri"},
+		Store:       store,
+		Stdout:      io.Discard,
+		SpawnWindow: func([]string) error { spawnCalled = true; return nil },
+	}
+
+	if err := app.Restore(context.Background(), "proj", false); err == nil {
+		t.Fatal("Restore of a snapshot saved for a different backend: expected an error, got nil")
+	}
+	if spawnCalled {
+		t.Error("SpawnWindow was called despite the backend mismatch")
+	}
+}
 
 func TestRestoreRelaunches(t *testing.T) {
+	store := &snapshot.Store{Dir: t.TempDir()}
+	seedSnapshot(t, store, "anything")
+
 	var spawned []string
 	app := &App{
-		Store:       &snapshot.Store{Dir: t.TempDir()},
+		Backend:     &fakeBackend{name: "niri"},
+		Store:       store,
 		Stdout:      io.Discard,
 		SpawnWindow: func(cmd []string) error { spawned = cmd; return nil },
 	}
 
-	// Never gets far enough to load "anything" as a snapshot -- Restore
-	// relaunches unconditionally, before ever touching the store.
 	if err := app.Restore(context.Background(), "anything", true); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -235,9 +291,13 @@ func TestRestoreRelaunches(t *testing.T) {
 }
 
 func TestRestoreOmitsForceWhenUnset(t *testing.T) {
+	store := &snapshot.Store{Dir: t.TempDir()}
+	seedSnapshot(t, store, "anything")
+
 	var spawned []string
 	app := &App{
-		Store:       &snapshot.Store{Dir: t.TempDir()},
+		Backend:     &fakeBackend{name: "niri"},
+		Store:       store,
 		Stdout:      io.Discard,
 		SpawnWindow: func(cmd []string) error { spawned = cmd; return nil },
 	}
@@ -251,8 +311,12 @@ func TestRestoreOmitsForceWhenUnset(t *testing.T) {
 }
 
 func TestRestoreSurfacesSpawnFailure(t *testing.T) {
+	store := &snapshot.Store{Dir: t.TempDir()}
+	seedSnapshot(t, store, "anything")
+
 	app := &App{
-		Store:       &snapshot.Store{Dir: t.TempDir()},
+		Backend:     &fakeBackend{name: "niri"},
+		Store:       store,
 		Stdout:      io.Discard,
 		SpawnWindow: func([]string) error { return errors.New("no ghostty on PATH") },
 	}

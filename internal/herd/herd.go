@@ -123,8 +123,19 @@ func (a *App) Save(ctx context.Context, name string, force bool) error {
 
 // Restore relaunches itself in a new window to perform the actual
 // restore there (RestoreInPlace), rather than doing the work in the
-// window it was invoked from.
+// window it was invoked from. It checks upfront that name is actually
+// restorable -- a bad name, or one saved for a different backend, should
+// fail immediately in the calling window, not spawn a window only to
+// fail inside it.
 func (a *App) Restore(ctx context.Context, name string, force bool) error {
+	snap, err := a.Store.Load(name)
+	if err != nil {
+		return err
+	}
+	if snap.Backend != a.Backend.Name() {
+		return fmt.Errorf("snapshot %q was saved with backend %q, active backend is %q", name, snap.Backend, a.Backend.Name())
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("couldn't find herd's own binary to relaunch it: %w", err)
