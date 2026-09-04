@@ -37,7 +37,7 @@ func Spawn(workDir string, cmd []string) error {
 	if err := c.Start(); err != nil {
 		return err
 	}
-	go c.Wait()
+	go c.Wait() //nolint:errcheck // fire-and-forget reap; the exit status of a detached window's launcher process isn't actionable
 	return nil
 }
 

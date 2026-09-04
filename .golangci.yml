@@ -1,0 +1,15 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      # A failed write to stdout/stderr isn't something a CLI tool can
+      # meaningfully react to; checking it on every progress/usage print
+      # would be pure noise. This is the standard errcheck exclude list
+      # for exactly that case (github.com/kisielk/errcheck#excluding-functions).
+      exclude-functions:
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln

@@ -300,7 +300,7 @@ func ConfirmPrompt(in io.Reader, out io.Writer) func(string) bool {
 	return func(prompt string) bool {
 		fmt.Fprintf(out, "%s [y/N] ", prompt)
 		var ans string
-		fmt.Fscanln(in, &ans)
+		_, _ = fmt.Fscanln(in, &ans) // EOF or no input leaves ans empty, correctly treated as "no" below
 		return ans == "y" || ans == "Y"
 	}
 }
